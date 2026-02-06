@@ -12,7 +12,7 @@ class ControllerInjector {
     constructor(config = {}) {
         this.logger = new Logger('ControllerInjector');
         this.mode = config.mode || process.env.INJECTION_MODE || 'pty';
-        this.defaultSession = config.defaultSession || process.env.TMUX_SESSION || 'claude-code';
+        this.defaultSession = config.defaultSession || process.env.TMUX_SESSION || 'claude-code:main';
     }
 
     async injectCommand(command, sessionName = null) {
@@ -29,7 +29,9 @@ class ControllerInjector {
         try {
             // Check if tmux session exists
             try {
-                execSync(`tmux has-session -t ${sessionName}`, { stdio: 'ignore' });
+                // Support session:window format
+                const sessionOnly = sessionName.split(':')[0];
+                execSync(`tmux has-session -t ${sessionOnly}`, { stdio: 'ignore' });
             } catch (error) {
                 throw new Error(`Tmux session '${sessionName}' not found`);
             }
