@@ -1,6 +1,6 @@
 {
   "name": "claude-code-remote",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Claude Code Smart Notification System - Send desktop notifications when Claude completes tasks or needs input",
   "main": "hook-notify.js",
   "scripts": {
@@ -38,12 +38,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Claude-Code-Remote/Claude-Code-Remote.git"
+    "url": "https://github.com/aristcc/Claude-Code-Remote.git"
   },
   "bugs": {
-    "url": "https://github.com/Claude-Code-Remote/Claude-Code-Remote/issues"
+    "url": "https://github.com/aristcc/Claude-Code-Remote/issues"
   },
-  "homepage": "https://github.com/Claude-Code-Remote/Claude-Code-Remote#readme",
+  "homepage": "https://github.com/aristcc/Claude-Code-Remote#readme",
   "dependencies": {
     "axios": "^1.6.0",
     "dotenv": "^17.2.1",
