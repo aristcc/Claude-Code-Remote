@@ -6,11 +6,40 @@ Control [Claude Code](https://claude.ai/code) remotely via multiple messaging pl
 
 ## What's New in This Fork
 
+- **Dual mode support** — Token-based multi-session (default) or tokenless Mirror Mode, controlled by `MIRROR_MODE` env var.
 - **Mirror Mode** — Bidirectional sync between your terminal (tmux) and Telegram. Both sides see the same Claude conversation.
-- **Simplified Telegram commands** — No token required. Just type your message or use `/cmd <command>`.
 - **Transcript-based notifications** — Reads the actual Claude transcript file for accurate output (fixes `type: 'user'` vs `'human'` parsing).
-- **HTML formatting with auto-fallback** — Sends Telegram messages as HTML; falls back to plain text if parsing fails.
-- **Cleaned up session management** — Removed token/session system for single-user mirror mode use.
+- **HTML formatting with auto-fallback** — Mirror mode sends Telegram messages as HTML; falls back to plain text if parsing fails.
+- **Real-time tool notifications** — Optional `PostToolUse` hook sends each tool call (Bash, Read, Edit, Grep, etc.) to Telegram as it happens, so you can watch Claude's thinking process live.
+
+## Modes
+
+This fork supports two operation modes via the `MIRROR_MODE` environment variable:
+
+### Token Mode (default, `MIRROR_MODE=false` or unset)
+
+The original upstream behavior. Each notification includes a unique 8-character session token. Commands from Telegram require the token:
+
+```
+/cmd ABC12345 analyze this code
+```
+
+- Supports multiple concurrent Claude sessions
+- Tokens expire after 24 hours
+- Notifications include inline keyboard buttons for easy command formatting
+
+### Mirror Mode (`MIRROR_MODE=true`)
+
+Tokenless direct injection for single-session use. Just type your message in Telegram and it goes straight to Claude:
+
+```
+analyze this code
+```
+
+- No tokens, no buttons — just type
+- Full Claude responses sent to Telegram (with HTML formatting)
+- Long responses auto-split into multiple messages
+- Requires a single tmux session target (`TMUX_SESSION`)
 
 ## Supported Platforms
 
@@ -60,16 +89,26 @@ Add to `~/.claude/settings.json`:
 {
   "hooks": {
     "Stop": [{
-      "matcher": "*",
       "hooks": [{
         "type": "command",
         "command": "node /path/to/Claude-Code-Remote/claude-hook-notify.js completed",
-        "timeout": 5
+        "timeout": 15
+      }]
+    }],
+    "PostToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "node /path/to/Claude-Code-Remote/claude-hook-tool.js",
+        "timeout": 10,
+        "async": true
       }]
     }]
   }
 }
 ```
+
+- **Stop hook**: Sends the final response to Telegram when Claude finishes.
+- **PostToolUse hook** (optional): Sends each tool call to Telegram in real-time. Remove this section if you only want final responses.
 
 Or run the interactive setup:
 
@@ -115,6 +154,7 @@ This will:
 - **Terminal**: `tmux attach -t claude-code` — interact with Claude normally
 - **Telegram**: Type a message or `/cmd <command>` — it goes to the same Claude session
 - **Notifications**: When Claude finishes, you get the full response on Telegram
+- **Live progress**: With the PostToolUse hook, watch every tool call in real-time (💻 Bash, 📖 Read, 📝 Edit, 🔍 Grep, etc.)
 
 ### Architecture
 
@@ -159,6 +199,7 @@ Sound alerts play automatically when Claude completes a task.
 
 | Variable | Default | Description |
 |---|---|---|
+| `MIRROR_MODE` | `false` | `true` for tokenless direct injection, `false` for token-based sessions |
 | `TELEGRAM_ENABLED` | `false` | Enable Telegram notifications |
 | `TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | — | Your personal chat ID |

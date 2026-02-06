@@ -1,21 +1,29 @@
 /**
  * Telegram Webhook Handler
- * Handles incoming Telegram messages and commands for Mirror Mode
+ * Handles incoming Telegram messages and commands
+ * Supports both token-based (default) and mirror mode (tokenless) operation
  */
 
 const express = require('express');
 const axios = require('axios');
+const path = require('path');
+const fs = require('fs');
 const Logger = require('../../core/logger');
 const ControllerInjector = require('../../utils/controller-injector');
 
 class TelegramWebhookHandler {
     constructor(config = {}) {
         this.config = config;
+        this.mirrorMode = process.env.MIRROR_MODE === 'true';
         this.logger = new Logger('TelegramWebhook');
         this.injector = new ControllerInjector();
         this.app = express();
         this.apiBaseUrl = 'https://api.telegram.org';
         this.botUsername = null;
+
+        if (!this.mirrorMode) {
+            this.sessionsDir = path.join(__dirname, '../../data/sessions');
+        }
 
         this._setupMiddleware();
         this._setupRoutes();
@@ -84,6 +92,16 @@ class TelegramWebhookHandler {
             return;
         }
 
+        if (this.mirrorMode) {
+            await this._handleMirrorMessage(chatId, messageText);
+        } else {
+            await this._handleTokenMessage(chatId, messageText);
+        }
+    }
+
+    // ── Mirror Mode Message Handling ────────────────────────────────
+
+    async _handleMirrorMessage(chatId, messageText) {
         // /cmd <message> — explicit command prefix
         const commandMatch = messageText.match(/^\/cmd\s+(.+)$/is);
         if (commandMatch) {
@@ -116,43 +134,186 @@ class TelegramWebhookHandler {
         }
     }
 
+    // ── Token Mode Message Handling ─────────────────────────────────
+
+    async _handleTokenMessage(chatId, messageText) {
+        // /cmd TOKEN command
+        const commandMatch = messageText.match(/^\/cmd\s+([A-Z0-9]{8})\s+(.+)$/i);
+        if (commandMatch) {
+            await this._processTokenCommand(chatId, commandMatch[1].toUpperCase(), commandMatch[2]);
+            return;
+        }
+
+        // TOKEN command (without /cmd prefix)
+        const directMatch = messageText.match(/^([A-Z0-9]{8})\s+(.+)$/);
+        if (directMatch) {
+            await this._processTokenCommand(chatId, directMatch[1].toUpperCase(), directMatch[2]);
+            return;
+        }
+
+        await this._sendMessage(chatId,
+            '❌ Invalid format. Use:\n`/cmd <TOKEN> <command>`\n\nExample:\n`/cmd ABC12345 analyze this code`',
+            { parse_mode: 'Markdown' });
+    }
+
+    async _processTokenCommand(chatId, token, command) {
+        const session = await this._findSessionByToken(token);
+        if (!session) {
+            await this._sendMessage(chatId,
+                '❌ Invalid or expired token. Please wait for a new task notification.',
+                { parse_mode: 'Markdown' });
+            return;
+        }
+
+        if (session.expiresAt < Math.floor(Date.now() / 1000)) {
+            await this._sendMessage(chatId,
+                '❌ Token has expired. Please wait for a new task notification.',
+                { parse_mode: 'Markdown' });
+            await this._removeSession(session.id);
+            return;
+        }
+
+        try {
+            const tmuxSession = session.tmuxSession || 'default';
+            await this.injector.injectCommand(command, tmuxSession);
+
+            await this._sendMessage(chatId,
+                `✅ *Command sent successfully*\n\n📝 *Command:* ${command}\n🖥️ *Session:* ${tmuxSession}\n\nClaude is now processing your request...`,
+                { parse_mode: 'Markdown' });
+
+            this.logger.info(`Command injected - User: ${chatId}, Token: ${token}, Command: ${command}`);
+        } catch (error) {
+            this.logger.error('Command injection failed:', error.message);
+            await this._sendMessage(chatId,
+                `❌ *Command execution failed:* ${error.message}`,
+                { parse_mode: 'Markdown' });
+        }
+    }
+
+    async _findSessionByToken(token) {
+        if (!this.sessionsDir) return null;
+
+        let files;
+        try {
+            files = fs.readdirSync(this.sessionsDir);
+        } catch (error) {
+            this.logger.error('Failed to read sessions directory:', error.message);
+            return null;
+        }
+
+        for (const file of files) {
+            if (!file.endsWith('.json')) continue;
+
+            const sessionPath = path.join(this.sessionsDir, file);
+            try {
+                const session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+                if (session.token === token) {
+                    return session;
+                }
+            } catch (error) {
+                this.logger.error(`Failed to read session file ${file}:`, error.message);
+            }
+        }
+
+        return null;
+    }
+
+    async _removeSession(sessionId) {
+        if (!this.sessionsDir) return;
+
+        const sessionFile = path.join(this.sessionsDir, `${sessionId}.json`);
+        if (fs.existsSync(sessionFile)) {
+            fs.unlinkSync(sessionFile);
+            this.logger.debug(`Session removed: ${sessionId}`);
+        }
+    }
+
+    // ── Callback Query Handling ─────────────────────────────────────
+
     async _handleCallbackQuery(callbackQuery) {
         const chatId = callbackQuery.message.chat.id;
         const data = callbackQuery.data;
 
         await this._answerCallbackQuery(callbackQuery.id);
 
-        // Handle legacy callback buttons from old notifications
-        if (data.startsWith('personal:') || data.startsWith('group:') || data.startsWith('session:')) {
-            await this._sendMessage(chatId,
-                `📝 *Mirror Mode is active!*\n\nJust type your message directly — no token needed.\n\nOr use: \`/cmd <your command>\``,
-                { parse_mode: 'Markdown' });
+        if (this.mirrorMode) {
+            // Mirror mode: buttons are legacy, inform user to type directly
+            if (data.startsWith('personal:') || data.startsWith('group:') || data.startsWith('session:')) {
+                await this._sendMessage(chatId,
+                    `📝 *Mirror Mode is active!*\n\nJust type your message directly — no token needed.\n\nOr use: \`/cmd <your command>\``,
+                    { parse_mode: 'Markdown' });
+            }
+        } else {
+            // Token mode: show command format with the token
+            if (data.startsWith('personal:')) {
+                const token = data.split(':')[1];
+                await this._sendMessage(chatId,
+                    `📝 *Personal Chat Command Format:*\n\n\`/cmd ${token} <your command>\`\n\n*Example:*\n\`/cmd ${token} please analyze this code\`\n\n💡 *Copy and paste the format above, then add your command!*`,
+                    { parse_mode: 'Markdown' });
+            } else if (data.startsWith('group:')) {
+                const token = data.split(':')[1];
+                const botUsername = await this._getBotUsername();
+                await this._sendMessage(chatId,
+                    `👥 *Group Chat Command Format:*\n\n\`@${botUsername} /cmd ${token} <your command>\`\n\n*Example:*\n\`@${botUsername} /cmd ${token} please analyze this code\`\n\n💡 *Copy and paste the format above, then add your command!*`,
+                    { parse_mode: 'Markdown' });
+            } else if (data.startsWith('session:')) {
+                const token = data.split(':')[1];
+                await this._sendMessage(chatId,
+                    `📝 *How to send a command:*\n\nType:\n\`/cmd ${token} <your command>\`\n\nExample:\n\`/cmd ${token} please analyze this code\`\n\n💡 *Tip:* New notifications have a button that auto-fills the command for you!`,
+                    { parse_mode: 'Markdown' });
+            }
         }
     }
 
-    async _sendWelcomeMessage(chatId) {
-        const message = `🤖 *Welcome to Claude Code Remote Bot!*\n\n` +
-            `I'll notify you when Claude completes tasks or needs input.\n\n` +
-            `*Mirror Mode:* Just type your message and it goes directly to Claude.\n\n` +
-            `Or use: \`/cmd <your command>\`\n\n` +
-            `Type /help for more information.`;
+    // ── Welcome / Help Messages ─────────────────────────────────────
 
-        await this._sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    async _sendWelcomeMessage(chatId) {
+        if (this.mirrorMode) {
+            const message = `🤖 *Welcome to Claude Code Remote Bot!*\n\n` +
+                `I'll notify you when Claude completes tasks or needs input.\n\n` +
+                `*Mirror Mode:* Just type your message and it goes directly to Claude.\n\n` +
+                `Or use: \`/cmd <your command>\`\n\n` +
+                `Type /help for more information.`;
+            await this._sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        } else {
+            const message = `🤖 *Welcome to Claude Code Remote Bot!*\n\n` +
+                `I'll notify you when Claude completes tasks or needs input.\n\n` +
+                `When you receive a notification with a token, you can send commands back using:\n` +
+                `\`/cmd <TOKEN> <your command>\`\n\n` +
+                `Type /help for more information.`;
+            await this._sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        }
     }
 
     async _sendHelpMessage(chatId) {
-        const message = `📚 *Claude Code Remote Bot Help*\n\n` +
-            `*Commands:*\n` +
-            `• \`/start\` - Welcome message\n` +
-            `• \`/help\` - Show this help\n` +
-            `• \`/cmd <command>\` - Send command to Claude\n\n` +
-            `*Mirror Mode:*\n` +
-            `Just type any message — it will be sent directly to your Claude session.\n\n` +
-            `*Example:*\n` +
-            `\`analyze the performance of this function\``;
-
-        await this._sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        if (this.mirrorMode) {
+            const message = `📚 *Claude Code Remote Bot Help*\n\n` +
+                `*Commands:*\n` +
+                `• \`/start\` - Welcome message\n` +
+                `• \`/help\` - Show this help\n` +
+                `• \`/cmd <command>\` - Send command to Claude\n\n` +
+                `*Mirror Mode:*\n` +
+                `Just type any message — it will be sent directly to your Claude session.\n\n` +
+                `*Example:*\n` +
+                `\`analyze the performance of this function\``;
+            await this._sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        } else {
+            const message = `📚 *Claude Code Remote Bot Help*\n\n` +
+                `*Commands:*\n` +
+                `• \`/start\` - Welcome message\n` +
+                `• \`/help\` - Show this help\n` +
+                `• \`/cmd <TOKEN> <command>\` - Send command to Claude\n\n` +
+                `*Example:*\n` +
+                `\`/cmd ABC12345 analyze the performance of this function\`\n\n` +
+                `*Tips:*\n` +
+                `• Tokens are case-insensitive\n` +
+                `• Tokens expire after 24 hours\n` +
+                `• You can also just type \`TOKEN command\` without /cmd`;
+            await this._sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        }
     }
+
+    // ── Utility Methods ─────────────────────────────────────────────
 
     _isAuthorized(userId, chatId) {
         const whitelist = this.config.whitelist || [];

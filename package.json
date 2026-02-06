@@ -1,6 +1,6 @@
 {
   "name": "claude-code-remote",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Claude Code Smart Notification System - Send desktop notifications when Claude completes tasks or needs input",
   "main": "hook-notify.js",
   "scripts": {
